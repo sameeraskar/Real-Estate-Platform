@@ -1,0 +1,17 @@
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+
+export async function POST(
+  _req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+
+  // Public endpoint: counts views
+  await prisma.listing.updateMany({
+    where: { id },
+    data: { viewCount: { increment: 1 } },
+  });
+
+  return NextResponse.json({ ok: true });
+}
