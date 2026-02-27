@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
+import AttributionCapture from "@/components/public/AttributionCapture";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -27,11 +28,7 @@ export default async function PublicListingsPage({
 
   const tenant = await prisma.tenant.findUnique({
     where: { slug },
-    select: {
-      id: true,
-      name: true,
-      site: { select: { brandName: true } },
-    },
+    select: { id: true, name: true, site: { select: { brandName: true } } },
   });
 
   if (!tenant) return <div className="p-6">Unknown tenant.</div>;
@@ -41,16 +38,15 @@ export default async function PublicListingsPage({
       tenantId: tenant.id,
       status: "ACTIVE",
       isHidden: false,
-
-      ...(city ? { city: { contains: city, mode: "insensitive" } } : {}),
+      ...(city ? { city: { contains: city } } : {}),
       ...(minPrice ? { price: { gte: minPrice } } : {}),
       ...(beds ? { beds: { gte: beds } } : {}),
       ...(q
         ? {
             OR: [
-              { title: { contains: q, mode: "insensitive" } },
-              { address: { contains: q, mode: "insensitive" } },
-              { description: { contains: q, mode: "insensitive" } },
+              { title: { contains: q } },
+              { address: { contains: q } },
+              { description: { contains: q } },
             ],
           }
         : {}),
@@ -63,6 +59,8 @@ export default async function PublicListingsPage({
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
+      <AttributionCapture />
+
       <div className="flex items-end justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-semibold">{brand} — Listings</h1>
@@ -74,7 +72,7 @@ export default async function PublicListingsPage({
         </Link>
       </div>
 
-      {/* Filters (GET → updates URL) */}
+      {/* Filters */}
       <form method="GET" className="grid md:grid-cols-4 gap-3 rounded-xl border p-4">
         <input
           name="q"
@@ -133,7 +131,7 @@ export default async function PublicListingsPage({
                   <img
                     src={l.imageUrl}
                     alt={l.title}
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-cover hover:scale-105 transition duration-300"
                   />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-gray-500">
@@ -144,26 +142,17 @@ export default async function PublicListingsPage({
 
               <div className="p-4 space-y-1">
                 <div className="font-semibold">{l.title}</div>
-
                 <div className="text-sm text-gray-600">
                   {[l.city, l.province].filter(Boolean).join(", ") || l.address || ""}
                 </div>
 
                 <div className="text-sm">
-                  {typeof l.price === "number"
-                    ? `$${l.price.toLocaleString()}`
-                    : "Price on request"}
+                  {typeof l.price === "number" ? `$${l.price.toLocaleString()}` : "Price on request"}
                 </div>
 
                 <div className="text-xs text-gray-600">
                   {l.beds ?? "-"} bd • {l.baths ?? "-"} ba • {l.sqft ?? "-"} sqft
                 </div>
-
-                {l.featured && (
-                  <div className="inline-block text-xs mt-2 px-2 py-1 rounded bg-yellow-100">
-                    Featured
-                  </div>
-                )}
               </div>
             </Link>
           ))}

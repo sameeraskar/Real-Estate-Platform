@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import ViewTracker from "@/components/public/ViewTracker";
+import AttributionCapture from "@/components/public/AttributionCapture";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -15,9 +16,8 @@ export default async function ListingDetailPage({
   const { slug, id } = await params;
   const sp = await searchParams;
 
-  // ✅ matches the redirect we return from /api/public/leads
-  const sent = sp.sent === "1";
-  const err = sp.err; // optional (e.g., "missing" | "tenant" | "listing")
+  const submitted = sp.submitted === "1";
+  const error = sp.error;
 
   const tenant = await prisma.tenant.findUnique({
     where: { slug },
@@ -31,7 +31,7 @@ export default async function ListingDetailPage({
   if (!tenant) return <div className="p-6">Unknown tenant.</div>;
 
   const listing = await prisma.listing.findFirst({
-    where: { id, tenantId: tenant.id, status: "ACTIVE" },
+    where: { id, tenantId: tenant.id, status: "ACTIVE", isHidden: false },
   });
 
   if (!listing) return <div className="p-6">Listing not found.</div>;
@@ -40,7 +40,7 @@ export default async function ListingDetailPage({
 
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-6">
-      {/* increments viewCount */}
+      <AttributionCapture />
       <ViewTracker listingId={listing.id} />
 
       <div className="flex items-center justify-between">
@@ -86,8 +86,7 @@ export default async function ListingDetailPage({
           </div>
 
           <div className="text-sm text-gray-600">
-            {listing.beds ?? "-"} bd • {listing.baths ?? "-"} ba •{" "}
-            {listing.sqft ?? "-"} sqft
+            {listing.beds ?? "-"} bd • {listing.baths ?? "-"} ba • {listing.sqft ?? "-"} sqft
           </div>
 
           {listing.description && (
@@ -100,25 +99,19 @@ export default async function ListingDetailPage({
       <div className="rounded-2xl border p-6 space-y-4">
         <h2 className="text-xl font-semibold">Book a viewing / Ask a question</h2>
 
-        {/* ✅ Success banner */}
-        {sent && (
-          <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-green-800 text-sm">
+        {submitted && (
+          <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-green-800">
             Thanks! Your message was sent. We’ll get back to you soon.
           </div>
         )}
 
-        {/* ✅ Error banner (optional support if you later redirect with ?err=...) */}
-        {!sent && err && (
-          <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-red-800 text-sm">
-            Something went wrong ({err}). Please try again.
+        {!submitted && error && (
+          <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-red-800">
+            Something went wrong. Please try again.
           </div>
         )}
 
-        <form
-          action="/api/public/leads"
-          method="POST"
-          className="grid md:grid-cols-2 gap-3"
-        >
+        <form action="/api/public/leads" method="POST" className="grid md:grid-cols-2 gap-3">
           <input type="hidden" name="tenantSlug" value={slug} />
           <input type="hidden" name="listingId" value={listing.id} />
 
