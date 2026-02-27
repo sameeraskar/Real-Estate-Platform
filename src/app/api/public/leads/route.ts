@@ -1,32 +1,43 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
-function normEmail(v: string) {
-  return v.trim().toLowerCase();
+const COOKIE_NAME = "rp_attrib";
+
+function parseCookieHeader(cookieHeader: string | null) {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+
+  for (const part of cookieHeader.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (!k) continue;
+    out[k] = decodeURIComponent(rest.join("=") || "");
+  }
+  return out;
 }
 
-function normPhone(v: string) {
-  // super basic normalization: keep digits only
-  return v.replace(/[^\d]/g, "");
+function safeJson(raw: string | undefined) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 export async function POST(req: Request) {
   const form = await req.formData();
 
-  const tenantSlug = String(form.get("tenantSlug") ?? "").trim();
-  const listingId = String(form.get("listingId") ?? "").trim();
-  const name = String(form.get("name") ?? "").trim();
-  const emailRaw = String(form.get("email") ?? "").trim();
-  const phoneRaw = String(form.get("phone") ?? "").trim();
-  const messageRaw = String(form.get("message") ?? "").trim();
-
-  const email = emailRaw ? normEmail(emailRaw) : "";
-  const phone = phoneRaw ? normPhone(phoneRaw) : "";
+  const tenantSlug = String(form.get("tenantSlug") ?? "");
+  const listingId = String(form.get("listingId") ?? "");
+  const name = String(form.get("name") ?? "");
+  const email = String(form.get("email") ?? "");
+  const phone = String(form.get("phone") ?? "");
+  const message = String(form.get("message") ?? "");
 
   if (!tenantSlug || !name || !email) {
-    return NextResponse.json(
-      { ok: false, error: "Missing fields" },
-      { status: 400 }
+    return NextResponse.redirect(
+      new URL(`/t/${tenantSlug}/listings/${listingId}?error=missing`, req.url),
+      { status: 303 }
     );
   }
 
@@ -36,10 +47,7 @@ export async function POST(req: Request) {
   });
 
   if (!tenant) {
-    return NextResponse.json(
-      { ok: false, error: "Unknown tenant" },
-      { status: 404 }
-    );
+    return NextResponse.redirect(new URL(`/t/${tenantSlug}?error=tenant`, req.url), { status: 303 });
   }
 
   // Optional: only attach listingId if it belongs to this tenant
@@ -52,60 +60,48 @@ export async function POST(req: Request) {
     if (listing) safeListingId = listing.id;
   }
 
-  // ✅ Upsert Contact (primary key for CRM)
-  // We'll prefer email as the stable identifier; phone is a fallback.
-  // NOTE: This assumes you made Contact.email unique per tenant later;
-  // for now, we do best-effort via findFirst + update/create.
-  const existingContact = await prisma.contact.findFirst({
-    where: {
-      tenantId: tenant.id,
-      OR: [
-        ...(email ? [{ email }] : []),
-        ...(phone ? [{ phone }] : []),
-      ],
-    },
-    select: { id: true },
-  });
+  // ✅ read attribution cookie
+  const cookieHeader = req.headers.get("cookie");
+  const cookies = parseCookieHeader(cookieHeader);
+  const attrib = safeJson(cookies[COOKIE_NAME]) ?? {};
 
-  const contact = existingContact
-    ? await prisma.contact.update({
-        where: { id: existingContact.id },
-        data: {
-          fullName: name || undefined,
-          email: email || undefined,
-          phone: phone || undefined,
-          updatedAt: new Date(),
-        },
-        select: { id: true },
-      })
-    : await prisma.contact.create({
-        data: {
-          tenantId: tenant.id,
-          fullName: name || null,
-          email: email || null,
-          phone: phone || null,
-        },
-        select: { id: true },
-      });
+  const userAgent = req.headers.get("user-agent") ?? null;
 
-  // ✅ Create Lead linked to Contact (and optionally Listing)
   await prisma.lead.create({
     data: {
       tenantId: tenant.id,
+      listingId: safeListingId,
       fullName: name,
       email,
       phone: phone || null,
-      message: messageRaw || null,
-      source: "listing-form",
-      listingId: safeListingId,
-      contactId: contact.id,
+      message: message || null,
+      source: safeListingId ? "listing-form" : "contact-form",
+
+      // ✅ attribution fields
+      utmSource: attrib.utmSource || null,
+      utmMedium: attrib.utmMedium || null,
+      utmCampaign: attrib.utmCampaign || null,
+      utmContent: attrib.utmContent || null,
+      utmTerm: attrib.utmTerm || null,
+
+      gclid: attrib.gclid || null,
+      gbraid: attrib.gbraid || null,
+      wbraid: attrib.wbraid || null,
+      fbclid: attrib.fbclid || null,
+
+      landingPath: attrib.landingPath || null,
+      referrer: attrib.referrer || null,
+      userAgent,
     },
   });
 
-  // ✅ Redirect back to listing with a success flag (instead of showing {"ok":true})
-  const redirectTo = safeListingId
-    ? `/t/${tenantSlug}/listings/${safeListingId}?sent=1`
-    : `/t/${tenantSlug}?sent=1`;
+  // ✅ redirect back to listing page with banner
+  if (safeListingId) {
+    return NextResponse.redirect(
+      new URL(`/t/${tenantSlug}/listings/${safeListingId}?submitted=1`, req.url),
+      { status: 303 }
+    );
+  }
 
-  return NextResponse.redirect(new URL(redirectTo, req.url));
+  return NextResponse.redirect(new URL(`/t/${tenantSlug}?submitted=1`, req.url), { status: 303 });
 }

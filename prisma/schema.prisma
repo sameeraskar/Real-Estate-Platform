@@ -27,14 +27,20 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users              User[]
-  domains            Domain[]
-  leads              Lead[]
-  site               Site?
-  listings           Listing[]
+  users    User[]
+  domains  Domain[]
+  leads    Lead[]
+  site     Site?
+  listings Listing[]
+
   contacts           Contact[]
   savedSearches      SavedSearch[]
   savedSearchMatches SavedSearchMatch[]
+
+  conversations        Conversation[]
+  messages             Message[]
+  engagementEvents     EngagementEvent[]
+  messagingProfile     TenantMessagingProfile?
 }
 
 model User {
@@ -43,6 +49,7 @@ model User {
   name      String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  assignedConversations Conversation[]
 
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -85,15 +92,13 @@ model Listing {
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  // ✅ Sync identity
-  source           String    @default("MANUAL")
-  sourceListingKey String
+  source           String? // e.g. PILLAR9
+  sourceListingKey String? // unique per tenant+source
   lastSyncedAt     DateTime?
   isHidden         Boolean   @default(false)
   featured         Boolean   @default(false)
 
-  // MVP fields
-  status   String  @default("ACTIVE") // ACTIVE, SOLD, DRAFT, INACTIVE
+  status   String  @default("ACTIVE")
   title    String
   address  String?
   city     String?
@@ -106,12 +111,12 @@ model Listing {
   sqft        Int?
   imageUrl    String?
   description String?
+  viewCount   Int     @default(0)
+  conversations Conversation[]
 
-  viewCount          Int                @default(0)
   leads              Lead[]
   savedSearchMatches SavedSearchMatch[]
 
-  // ✅ Prevent duplicates per tenant+source+key
   @@unique([tenantId, source, sourceListingKey], name: "listing_source_key_per_tenant")
 }
 
@@ -127,6 +132,22 @@ model Lead {
   source   String?
   status   LeadStatus @default(NEW)
 
+  // ✅ attribution (site + ads)
+  utmSource   String?
+  utmMedium   String?
+  utmCampaign String?
+  utmContent  String?
+  utmTerm     String?
+
+  gclid  String?
+  gbraid String?
+  wbraid String?
+  fbclid String?
+
+  landingPath String?
+  referrer    String?
+  userAgent   String?
+
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -135,6 +156,8 @@ model Lead {
 
   contactId String?
   contact   Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  conversations Conversation[]
 }
 
 enum Channel {
@@ -154,13 +177,9 @@ model Contact {
   email    String?
   phone    String?
 
-  // Optional: for CRM pipeline later (NEW, QUALIFIED, etc.)
-  stage String @default("NEW")
-
-  savedSearches SavedSearch[]
   leads         Lead[]
-
-  @@index([tenantId])
+  savedSearches SavedSearch[]
+  conversations Conversation[]
 }
 
 model SavedSearch {
@@ -174,24 +193,17 @@ model SavedSearch {
   contactId String
   contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
-  name String? // optional label like "NW Calgary under 700k"
+  name String
 
-  // Common filters (indexed-ish)
-  city         String?
-  minPrice     Int?
-  maxPrice     Int?
-  minBeds      Int?
-  maxBeds      Int?
-  minBaths     Int?
-  maxBaths     Int?
-  minSqft      Int?
-  maxSqft      Int?
-  propertyType String? // "DETACHED", "CONDO", etc.
+  criteria Json
 
-  // Flexible filters (areas, keywords, features)
-  filters Json?
+  isActive Boolean @default(true)
 
   matches SavedSearchMatch[]
+  lastRunAt DateTime?
+
+  @@index([tenantId])
+  @@index([contactId])
 }
 
 model SavedSearchMatch {
@@ -207,6 +219,179 @@ model SavedSearchMatch {
   listingId String
   listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
 
-  // Prevent duplicates: one match per (search, listing)
-  @@unique([savedSearchId, listingId], name: "uniq_match_per_search_listing")
+  isNew Boolean @default(true)
+
+  // prevents duplicate matches for same search+listing
+  @@unique([savedSearchId, listingId])
+  @@index([tenantId])
+  @@index([listingId])
+}
+
+enum ConversationStatus {
+  OPEN
+  CLOSED
+  ARCHIVED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageStatus {
+  DRAFT
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+  BOUNCED
+}
+
+enum MessagingProvider {
+  TWILIO
+  SENDGRID
+  MAILGUN
+  SES
+  OTHER
+}
+
+enum EngagementType {
+  DELIVERED
+  OPEN
+  CLICK
+  BOUNCE
+  REPLY
+  STOP
+  UNSUBSCRIBE
+}
+
+model Conversation {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  channel Channel
+
+  status ConversationStatus @default(OPEN)
+
+  // assignment / workflow
+  assignedUserId String?
+  assignedUser   User? @relation(fields: [assignedUserId], references: [id], onDelete: SetNull)
+
+  // AI control (Phase 1: use OFF/DRAFTS behavior in app code; keep fields for Phase 2+)
+  aiMode         String?   // "OFF" | "DRAFTS" | "AUTO" (string keeps it flexible)
+  aiPausedUntil  DateTime?
+
+  lastMessageAt  DateTime?
+  lastInboundAt  DateTime?
+  lastOutboundAt DateTime?
+
+  // optional context
+  listingId String?
+  listing   Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  leadId String?
+  lead   Lead? @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  messages         Message[]
+  engagementEvents EngagementEvent[]
+
+  @@index([tenantId, contactId])
+  @@index([tenantId, lastMessageAt])
+  @@index([tenantId, status])
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  channel    Channel
+  direction  MessageDirection
+  status     MessageStatus @default(QUEUED)
+
+  // normalized addressing (phone numbers / email addresses)
+  from String
+  to   String
+
+  subject String?
+  text    String?
+  html    String?
+
+  // provider metadata for webhooks + reconciliation
+  provider          MessagingProvider @default(OTHER)
+  providerMessageId String?
+
+  errorCode    String?
+  errorMessage String?
+
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  failedAt    DateTime?
+
+  // email tracking (open/click)
+  trackingId String? @unique
+
+  engagementEvents EngagementEvent[]
+
+  @@index([tenantId, conversationId, createdAt])
+  @@index([tenantId, createdAt])
+  @@unique([provider, providerMessageId])
+}
+
+model EngagementEvent {
+  id         String   @id @default(cuid())
+  occurredAt DateTime @default(now())
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  type EngagementType
+
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  messageId String?
+  message   Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  meta Json?
+
+  @@index([tenantId, occurredAt])
+  @@index([tenantId, conversationId, occurredAt])
+  @@index([tenantId, messageId, occurredAt])
+}
+
+model TenantMessagingProfile {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenantId String @unique
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // SMS identity
+  smsFromNumber String? // E.164, ex: +1403...
+  smsProvider   MessagingProvider @default(OTHER)
+
+  // Email identity
+  emailFromAddress String?
+  emailFromName    String?
+  replyToAddress   String?
+  emailProvider    MessagingProvider @default(OTHER)
+
+  // optional flags
+  enableSms   Boolean @default(false)
+  enableEmail Boolean @default(false)
 }
