@@ -1,138 +1,6 @@
 import { prisma } from '@/lib/prisma';
-import { z } from 'zod';
-import { Prisma } from '@prisma/client';
-
-// ============================================================================
-// ZOD SCHEMAS
-// ============================================================================
-
-const listConversationsSchema = z.object({
-  status: z.enum(['ACTIVE', 'ARCHIVED', 'SNOOZED']).optional(),
-  channel: z.enum(['SMS', 'EMAIL', 'WHATSAPP', 'FACEBOOK', 'INSTAGRAM', 'VOICE']).optional(),
-  contactId: z.string().optional(),
-  limit: z.number().min(1).max(100).default(50).optional(),
-  cursor: z.string().optional(),
-});
-
-const createConversationSchema = z.object({
-  contactId: z.string(),
-  channel: z.enum(['SMS', 'EMAIL', 'WHATSAPP', 'FACEBOOK', 'INSTAGRAM', 'VOICE']),
-  listingId: z.string().optional(),
-  leadId: z.string().optional(),
-  assignedUserId: z.string().optional(),
-});
-
-const createOutboundMessageSchema = z.object({
-  channel: z.enum(['SMS', 'EMAIL', 'WHATSAPP', 'FACEBOOK', 'INSTAGRAM', 'VOICE']),
-  text: z.string().min(1),
-  subject: z.string().optional(),
-});
-
-const outboundMetadataSchema = z.object({
-  from: z.string(),
-  to: z.string(),
-  provider: z.string().optional(),
-});
-
-const createInboundMessageSchema = z.object({
-  channel: z.enum(['SMS', 'EMAIL', 'WHATSAPP', 'FACEBOOK', 'INSTAGRAM', 'VOICE']),
-  text: z.string().min(1),
-  subject: z.string().optional(),
-  from: z.string(),
-  to: z.string(),
-  provider: z.string().optional(),
-  providerMessageId: z.string().optional(),
-});
-
-const addEngagementEventSchema = z.object({
-  conversationId: z.string().optional(),
-  messageId: z.string().optional(),
-  type: z.string(),
-  meta: z.record(z.any()).optional(),
-});
-
-// ============================================================================
-// TYPE DEFINITIONS
-// ============================================================================
-
-export type ListConversationsParams = z.infer<typeof listConversationsSchema>;
-export type CreateConversationParams = z.infer<typeof createConversationSchema>;
-export type CreateOutboundMessageParams = z.infer<typeof createOutboundMessageSchema>;
-export type OutboundMetadata = z.infer<typeof outboundMetadataSchema>;
-export type CreateInboundMessageParams = z.infer<typeof createInboundMessageSchema>;
-export type AddEngagementEventParams = z.infer<typeof addEngagementEventSchema>;
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
-/**
- * Verify that a contact belongs to the specified tenant
- */
-async function verifyContactOwnership(tenantId: string, contactId: string): Promise<void> {
-  const contact = await prisma.contact.findFirst({
-    where: {
-      id: contactId,
-      tenantId,
-    },
-    select: { id: true },
-  });
-
-  if (!contact) {
-    throw new Error(`Contact ${contactId} not found or does not belong to tenant ${tenantId}`);
-  }
-}
-
-/**
- * Verify that a user belongs to the specified tenant
- */
-async function verifyUserOwnership(tenantId: string, userId: string): Promise<void> {
-  const user = await prisma.user.findFirst({
-    where: {
-      id: userId,
-      tenantId,
-    },
-    select: { id: true },
-  });
-
-  if (!user) {
-    throw new Error(`User ${userId} not found or does not belong to tenant ${tenantId}`);
-  }
-}
-
-/**
- * Verify that a listing belongs to the specified tenant
- */
-async function verifyListingOwnership(tenantId: string, listingId: string): Promise<void> {
-  const listing = await prisma.listing.findFirst({
-    where: {
-      id: listingId,
-      tenantId,
-    },
-    select: { id: true },
-  });
-
-  if (!listing) {
-    throw new Error(`Listing ${listingId} not found or does not belong to tenant ${tenantId}`);
-  }
-}
-
-/**
- * Verify that a lead belongs to the specified tenant
- */
-async function verifyLeadOwnership(tenantId: string, leadId: string): Promise<void> {
-  const lead = await prisma.lead.findFirst({
-    where: {
-      id: leadId,
-      tenantId,
-    },
-    select: { id: true },
-  });
-
-  if (!lead) {
-    throw new Error(`Lead ${leadId} not found or does not belong to tenant ${tenantId}`);
-  }
-}
+import { CreateConversationSchema, SendMessageSchema } from './schemas';
+import type { CreateConversationInput, SendMessageInput } from './schemas';
 
 // ============================================================================
 // CONVERSATION OPERATIONS
@@ -140,7 +8,7 @@ async function verifyLeadOwnership(tenantId: string, leadId: string): Promise<vo
 
 /**
  * Get a conversation by ID with tenant ownership check
- * Throws if conversation doesn't exist or doesn't belong to tenant
+ * Throws Response 404 if conversation doesn't exist or doesn't belong to tenant
  */
 export async function getConversationOrThrow(
   tenantId: string,
@@ -149,7 +17,7 @@ export async function getConversationOrThrow(
   const conversation = await prisma.conversation.findFirst({
     where: {
       id: conversationId,
-      tenantId,
+      tenantId, // TENANT ISOLATION
     },
     include: {
       contact: {
@@ -159,13 +27,6 @@ export async function getConversationOrThrow(
           lastName: true,
           email: true,
           phone: true,
-        },
-      },
-      assignedUser: {
-        select: {
-          id: true,
-          name: true,
-          email: true,
         },
       },
       listing: {
@@ -186,141 +47,139 @@ export async function getConversationOrThrow(
   });
 
   if (!conversation) {
-    throw new Error(`Conversation ${conversationId} not found or access denied`);
+    throw new Response('Conversation not found', { status: 404 });
   }
 
   return conversation;
 }
 
 /**
- * List conversations for a tenant with optional filters
+ * List all conversations for a tenant
+ * Returns conversations ordered by lastMessageAt descending
  */
-export async function listConversations(
-  tenantId: string,
-  params: ListConversationsParams = {}
-) {
-  const validated = listConversationsSchema.parse(params);
-
-  const where: Prisma.ConversationWhereInput = {
-    tenantId,
-    ...(validated.status && { status: validated.status }),
-    ...(validated.channel && { channel: validated.channel }),
-    ...(validated.contactId && { contactId: validated.contactId }),
-  };
-
-  const [conversations, total] = await Promise.all([
-    prisma.conversation.findMany({
-      where,
-      include: {
-        contact: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            phone: true,
-          },
-        },
-        assignedUser: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-        _count: {
-          select: {
-            messages: true,
-          },
+export async function listConversations(tenantId: string) {
+  const conversations = await prisma.conversation.findMany({
+    where: {
+      tenantId, // TENANT ISOLATION
+    },
+    include: {
+      contact: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
         },
       },
-      orderBy: {
-        lastMessageAt: 'desc',
-      },
-      take: validated.limit || 50,
-      ...(validated.cursor && {
-        skip: 1,
-        cursor: {
-          id: validated.cursor,
+      _count: {
+        select: {
+          messages: true,
         },
-      }),
-    }),
-    prisma.conversation.count({ where }),
-  ]);
+      },
+    },
+    orderBy: {
+      lastMessageAt: 'desc',
+    },
+  });
 
-  return {
-    conversations,
-    total,
-    hasMore: conversations.length === (validated.limit || 50),
-    nextCursor: conversations.length > 0 ? conversations[conversations.length - 1].id : null,
-  };
+  return conversations;
 }
 
 /**
- * Create a new conversation or return existing one
- * Ensures all related entities belong to the tenant
+ * Create a new conversation
+ * Verifies contact belongs to tenant before creating
+ * Throws Response 404 if contact not found
  */
-export async function createOrGetConversation(
+export async function createConversationOrThrow(
   tenantId: string,
-  params: CreateConversationParams
+  data: CreateConversationInput
 ) {
-  const validated = createConversationSchema.parse(params);
+  // Validate input
+  const validated = CreateConversationSchema.parse(data);
 
-  // Verify contact ownership
-  await verifyContactOwnership(tenantId, validated.contactId);
-
-  // Verify optional relations
-  if (validated.assignedUserId) {
-    await verifyUserOwnership(tenantId, validated.assignedUserId);
-  }
-  if (validated.listingId) {
-    await verifyListingOwnership(tenantId, validated.listingId);
-  }
-  if (validated.leadId) {
-    await verifyLeadOwnership(tenantId, validated.leadId);
-  }
-
-  // Check if conversation already exists
-  const existing = await prisma.conversation.findFirst({
+  // Verify contact belongs to tenant
+  const contact = await prisma.contact.findFirst({
     where: {
-      tenantId,
-      contactId: validated.contactId,
-      channel: validated.channel,
-      status: 'ACTIVE',
+      id: validated.contactId,
+      tenantId, // TENANT ISOLATION
     },
-    include: {
-      contact: true,
-      assignedUser: true,
-      listing: true,
-      lead: true,
-    },
+    select: { id: true },
   });
 
-  if (existing) {
-    return { conversation: existing, created: false };
+  if (!contact) {
+    throw new Response('Contact not found or access denied', { status: 404 });
   }
 
-  // Create new conversation
+  // Verify listing belongs to tenant if provided
+  if (validated.listingId) {
+    const listing = await prisma.listing.findFirst({
+      where: {
+        id: validated.listingId,
+        tenantId, // TENANT ISOLATION
+      },
+      select: { id: true },
+    });
+
+    if (!listing) {
+      throw new Response('Listing not found or access denied', { status: 404 });
+    }
+  }
+
+  // Verify lead belongs to tenant if provided
+  if (validated.leadId) {
+    const lead = await prisma.lead.findFirst({
+      where: {
+        id: validated.leadId,
+        tenantId, // TENANT ISOLATION
+      },
+      select: { id: true },
+    });
+
+    if (!lead) {
+      throw new Response('Lead not found or access denied', { status: 404 });
+    }
+  }
+
+  // Create conversation
   const conversation = await prisma.conversation.create({
     data: {
-      tenantId,
+      tenantId, // TENANT ISOLATION
       contactId: validated.contactId,
       channel: validated.channel,
       status: 'ACTIVE',
-      ...(validated.listingId && { listingId: validated.listingId }),
-      ...(validated.leadId && { leadId: validated.leadId }),
-      ...(validated.assignedUserId && { assignedUserId: validated.assignedUserId }),
+      listingId: validated.listingId || null,
+      leadId: validated.leadId || null,
       lastMessageAt: new Date(),
     },
     include: {
-      contact: true,
-      assignedUser: true,
-      listing: true,
-      lead: true,
+      contact: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+        },
+      },
+      listing: {
+        select: {
+          id: true,
+          title: true,
+          address: true,
+        },
+      },
+      lead: {
+        select: {
+          id: true,
+          status: true,
+          source: true,
+        },
+      },
     },
   });
 
-  return { conversation, created: true };
+  return conversation;
 }
 
 // ============================================================================
@@ -328,12 +187,13 @@ export async function createOrGetConversation(
 // ============================================================================
 
 /**
- * List messages for a conversation with tenant check
+ * List messages for a conversation
+ * Verifies conversation belongs to tenant
+ * Returns messages ordered by createdAt ascending (oldest first)
  */
 export async function listMessages(
   tenantId: string,
-  conversationId: string,
-  options: { limit?: number; cursor?: string } = {}
+  conversationId: string
 ) {
   // Verify conversation ownership first
   await getConversationOrThrow(tenantId, conversationId);
@@ -342,19 +202,12 @@ export async function listMessages(
     where: {
       conversationId,
       conversation: {
-        tenantId, // Double-check tenant isolation
+        tenantId, // TENANT ISOLATION - double check
       },
     },
     orderBy: {
-      createdAt: 'desc',
+      createdAt: 'asc', // Oldest first (chat order)
     },
-    take: options.limit || 100,
-    ...(options.cursor && {
-      skip: 1,
-      cursor: {
-        id: options.cursor,
-      },
-    }),
   });
 
   return messages;
@@ -362,16 +215,17 @@ export async function listMessages(
 
 /**
  * Create an outbound message
+ * Stub implementation: immediately marks as SENT
  * Updates conversation timestamps
  */
 export async function createOutboundMessage(
   tenantId: string,
   conversationId: string,
-  messageData: CreateOutboundMessageParams,
-  metadata: OutboundMetadata
+  messageData: SendMessageInput,
+  metadata: { from: string; to: string }
 ) {
-  const validatedMessage = createOutboundMessageSchema.parse(messageData);
-  const validatedMetadata = outboundMetadataSchema.parse(metadata);
+  // Validate input
+  const validated = SendMessageSchema.parse(messageData);
 
   // Verify conversation ownership
   await getConversationOrThrow(tenantId, conversationId);
@@ -380,24 +234,25 @@ export async function createOutboundMessage(
 
   // Create message and update conversation in a transaction
   const [message] = await prisma.$transaction([
+    // Create outbound message
     prisma.message.create({
       data: {
         conversationId,
-        channel: validatedMessage.channel,
+        channel: validated.channel,
         direction: 'OUTBOUND',
-        text: validatedMessage.text,
-        subject: validatedMessage.subject || null,
-        status: 'SENT',
-        from: validatedMetadata.from,
-        to: validatedMetadata.to,
-        provider: validatedMetadata.provider || null,
+        text: validated.text,
+        subject: validated.subject || null,
+        status: 'SENT', // Stub: immediately mark as sent
+        from: metadata.from,
+        to: metadata.to,
         sentAt: now,
       },
     }),
+    // Update conversation timestamps
     prisma.conversation.update({
       where: {
         id: conversationId,
-        tenantId, // Ensure tenant isolation
+        tenantId, // TENANT ISOLATION
       },
       data: {
         lastMessageAt: now,
@@ -407,173 +262,4 @@ export async function createOutboundMessage(
   ]);
 
   return message;
-}
-
-/**
- * Create an inbound message
- * Updates conversation timestamps
- */
-export async function createInboundMessage(
-  tenantId: string,
-  conversationId: string,
-  messageData: CreateInboundMessageParams
-) {
-  const validated = createInboundMessageSchema.parse(messageData);
-
-  // Verify conversation ownership
-  await getConversationOrThrow(tenantId, conversationId);
-
-  const now = new Date();
-
-  // Create message and update conversation in a transaction
-  const [message] = await prisma.$transaction([
-    prisma.message.create({
-      data: {
-        conversationId,
-        channel: validated.channel,
-        direction: 'INBOUND',
-        text: validated.text,
-        subject: validated.subject || null,
-        status: 'RECEIVED',
-        from: validated.from,
-        to: validated.to,
-        provider: validated.provider || null,
-        providerMessageId: validated.providerMessageId || null,
-        receivedAt: now,
-      },
-    }),
-    prisma.conversation.update({
-      where: {
-        id: conversationId,
-        tenantId, // Ensure tenant isolation
-      },
-      data: {
-        lastMessageAt: now,
-        lastInboundAt: now,
-        unreadCount: {
-          increment: 1,
-        },
-      },
-    }),
-  ]);
-
-  return message;
-}
-
-// ============================================================================
-// ENGAGEMENT EVENTS
-// ============================================================================
-
-/**
- * Add an engagement event
- * Validates conversation/message ownership if provided
- */
-export async function addEngagementEvent(
-  tenantId: string,
-  params: AddEngagementEventParams
-) {
-  const validated = addEngagementEventSchema.parse(params);
-
-  // Verify conversation ownership if conversationId provided
-  if (validated.conversationId) {
-    await getConversationOrThrow(tenantId, validated.conversationId);
-  }
-
-  // Verify message ownership if messageId provided
-  if (validated.messageId) {
-    const message = await prisma.message.findFirst({
-      where: {
-        id: validated.messageId,
-        conversation: {
-          tenantId,
-        },
-      },
-      select: { id: true },
-    });
-
-    if (!message) {
-      throw new Error(`Message ${validated.messageId} not found or access denied`);
-    }
-  }
-
-  const event = await prisma.engagementEvent.create({
-    data: {
-      tenantId,
-      type: validated.type,
-      conversationId: validated.conversationId || null,
-      messageId: validated.messageId || null,
-      meta: validated.meta || Prisma.JsonNull,
-      timestamp: new Date(),
-    },
-  });
-
-  return event;
-}
-
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
-
-/**
- * Mark conversation as read
- */
-export async function markConversationAsRead(
-  tenantId: string,
-  conversationId: string
-) {
-  await getConversationOrThrow(tenantId, conversationId);
-
-  return prisma.conversation.update({
-    where: {
-      id: conversationId,
-      tenantId,
-    },
-    data: {
-      unreadCount: 0,
-      lastReadAt: new Date(),
-    },
-  });
-}
-
-/**
- * Update conversation status
- */
-export async function updateConversationStatus(
-  tenantId: string,
-  conversationId: string,
-  status: 'ACTIVE' | 'ARCHIVED' | 'SNOOZED'
-) {
-  await getConversationOrThrow(tenantId, conversationId);
-
-  return prisma.conversation.update({
-    where: {
-      id: conversationId,
-      tenantId,
-    },
-    data: {
-      status,
-    },
-  });
-}
-
-/**
- * Assign conversation to user
- */
-export async function assignConversation(
-  tenantId: string,
-  conversationId: string,
-  userId: string
-) {
-  await getConversationOrThrow(tenantId, conversationId);
-  await verifyUserOwnership(tenantId, userId);
-
-  return prisma.conversation.update({
-    where: {
-      id: conversationId,
-      tenantId,
-    },
-    data: {
-      assignedUserId: userId,
-    },
-  });
 }
