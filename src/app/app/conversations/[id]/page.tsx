@@ -1,155 +1,90 @@
-import { redirect } from 'next/navigation';
-import { getCurrentUser } from '@/lib/auth';
-import MessageComposer from '@/components/MessageComposer';
+import { redirect } from "next/navigation";
+import { getCurrentUser } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import MessageComposer from "@/components/MessageComposer";
 
-async function getConversation(conversationId: string) {
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+export default async function ConversationPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
   const user = await getCurrentUser();
-  if (!user) {
-    redirect('/auth/signin');
-  }
+  if (!user) redirect("/login");
 
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const response = await fetch(`${baseUrl}/api/conversations/${conversationId}`, {
-    cache: 'no-store',
+  const { id } = await params;
+
+  const conversation = await prisma.conversation.findFirst({
+    where: {
+      id,
+      tenantId: user.tenantId, // ✅ tenant isolation
+    },
+    include: {
+      contact: {
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          phone: true,
+        },
+      },
+      messages: {
+        orderBy: { createdAt: "asc" },
+        take: 200,
+        select: {
+          id: true,
+          createdAt: true,
+          direction: true,
+          status: true,
+          text: true,
+        },
+      },
+      listing: { select: { id: true, title: true } },
+      lead: { select: { id: true, status: true, source: true } },
+    },
   });
 
-  if (!response.ok) {
-    throw new Error('Failed to fetch conversation');
+  if (!conversation) {
+    return <div className="p-6">Conversation not found.</div>;
   }
 
-  const data = await response.json();
-  return data.conversation;
-}
-
-async function getMessages(conversationId: string) {
-  const user = await getCurrentUser();
-  if (!user) {
-    redirect('/auth/signin');
-  }
-
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const response = await fetch(`${baseUrl}/api/conversations/${conversationId}/messages`, {
-    cache: 'no-store',
-  });
-
-  if (!response.ok) {
-    throw new Error('Failed to fetch messages');
-  }
-
-  const data = await response.json();
-  return data.messages || [];
-}
-
-function formatMessageTime(date: string | Date) {
-  const d = new Date(date);
-  return d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
-}
-
-export default async function ConversationPage({ params }: { params: { id: string } }) {
-  const [conversation, messages] = await Promise.all([
-    getConversation(params.id),
-    getMessages(params.id),
-  ]);
-
-  const contactName = conversation.contact 
-    ? `${conversation.contact.firstName || ''} ${conversation.contact.lastName || ''}`.trim() || 'Unknown Contact'
-    : 'Unknown Contact';
-
-  // Reverse to show oldest first (bottom to top like chat)
-  const sortedMessages = [...messages].reverse();
+  const headerName = conversation.contact.fullName?.trim() || "Unknown Contact";
+  const headerInfo = conversation.contact.phone || conversation.contact.email || "";
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50">
+    <div className="p-6 max-w-3xl mx-auto space-y-6">
       {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          
-            href="/app/conversations"
-            className="text-gray-500 hover:text-gray-700 transition-colors"
-          >
-            <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
-          </a>
-          <div>
-            <h1 className="text-xl font-semibold text-gray-900">{contactName}</h1>
-            <div className="flex items-center space-x-2 text-sm text-gray-500">
-              <span>{conversation.contact?.email || conversation.contact?.phone}</span>
-              <span>•</span>
-              <span className="capitalize">{conversation.channel.toLowerCase()}</span>
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center space-x-2">
-          <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-            {conversation.status}
-          </span>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold">{headerName}</h1>
+          {headerInfo ? <p className="text-sm text-gray-500">{headerInfo}</p> : null}
         </div>
       </div>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto px-6 py-4">
-        {sortedMessages.length === 0 ? (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center text-gray-500">
-              <p>No messages yet. Send the first message below.</p>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-4 max-w-4xl mx-auto">
-            {sortedMessages.map((message: any) => {
-              const isOutbound = message.direction === 'OUTBOUND';
-              
-              return (
-                <div
-                  key={message.id}
-                  className={`flex ${isOutbound ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div className={`max-w-lg ${isOutbound ? 'items-end' : 'items-start'} flex flex-col`}>
-                    <div
-                      className={`rounded-lg px-4 py-3 ${
-                        isOutbound
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-white border border-gray-200 text-gray-900'
-                      }`}
-                    >
-                      {message.subject && (
-                        <div className={`font-semibold mb-1 ${isOutbound ? 'text-blue-100' : 'text-gray-700'}`}>
-                          {message.subject}
-                        </div>
-                      )}
-                      <p className="whitespace-pre-wrap break-words">{message.text}</p>
-                    </div>
-                    <div className="flex items-center mt-1 space-x-2 text-xs text-gray-500">
-                      <span>{formatMessageTime(message.createdAt)}</span>
-                      {isOutbound && message.status && (
-                        <>
-                          <span>•</span>
-                          <span className="capitalize">{message.status.toLowerCase()}</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+      {/* Messages */}
+      <div className="rounded-lg border bg-white">
+        <div className="border-b px-4 py-2 text-sm font-medium">Messages</div>
+
+        <div className="p-4 space-y-3">
+          {conversation.messages.length === 0 ? (
+            <p className="text-gray-500 text-sm">No messages yet.</p>
+          ) : (
+            conversation.messages.map((m) => (
+              <div key={m.id} className="text-sm">
+                <span className="font-medium">{m.direction}</span>
+                <span className="text-gray-400"> • </span>
+                <span className="text-gray-500">{new Date(m.createdAt).toLocaleString()}</span>
+                <div className="mt-1">{m.text || <span className="text-gray-400">(no text)</span>}</div>
+              </div>
+            ))
+          )}
+        </div>
       </div>
 
-      {/* Message Composer */}
-      <div className="bg-white border-t border-gray-200 px-6 py-4">
-        <MessageComposer 
-          conversationId={params.id} 
-          channel={conversation.channel}
-        />
-      </div>
+      {/* Composer */}
+      <MessageComposer conversationId={id} channel={conversation.channel} />
     </div>
   );
 }

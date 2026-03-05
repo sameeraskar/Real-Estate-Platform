@@ -1,78 +1,34 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
-import { getCurrentUser } from '@/lib/auth';
+import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth";
 import {
   getConversationOrThrow,
   listMessages,
   createOutboundMessage,
-  addEngagementEvent,
-} from '@/lib/messaging/conversationService';
-import { prisma } from '@/lib/prisma';
-
-// ============================================================================
-// VALIDATION SCHEMAS
-// ============================================================================
-
-const sendMessageSchema = z.object({
-  channel: z.enum(['SMS', 'EMAIL', 'WHATSAPP', 'FACEBOOK', 'INSTAGRAM', 'VOICE']),
-  text: z.string().min(1, 'Message text is required'),
-  subject: z.string().optional(),
-});
+} from "@/lib/messaging/conversationService";
+import { SendMessageSchema } from "@/lib/messaging/schemas";
+import { prisma } from "@/lib/prisma";
+import { z } from "zod";
 
 // ============================================================================
 // GET - List Messages
 // ============================================================================
 
 export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
+  _request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // 1. Authenticate user
-    const user = await getCurrentUser();
-    if (!user || !user.tenantId) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
+    const user = await requireAuth();
+    const { id: conversationId } = await params;
 
-    const conversationId = params.id;
+    const messages = await listMessages(user.tenantId, conversationId);
 
-    // 2. Verify conversation belongs to tenant (throws if not found/unauthorized)
-    await getConversationOrThrow(user.tenantId, conversationId);
-
-    // 3. Parse query parameters
-    const { searchParams } = new URL(request.url);
-    const options = {
-      limit: searchParams.get('limit') ? parseInt(searchParams.get('limit')!) : 100,
-      cursor: searchParams.get('cursor') || undefined,
-    };
-
-    // 4. Get messages with tenant check
-    const messages = await listMessages(user.tenantId, conversationId, options);
-
-    return NextResponse.json({
-      messages,
-      hasMore: messages.length === options.limit,
-      nextCursor: messages.length > 0 ? messages[messages.length - 1].id : null,
-    });
+    return NextResponse.json({ messages });
   } catch (error) {
-    console.error('List messages error:', error);
+    if (error instanceof Response) return error;
 
-    if (error instanceof Error) {
-      if (error.message.includes('not found') || error.message.includes('access denied')) {
-        return NextResponse.json(
-          { error: 'Conversation not found' },
-          { status: 404 }
-        );
-      }
-    }
-
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    console.error("List messages error:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -82,141 +38,83 @@ export async function GET(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // 1. Authenticate user
-    const user = await getCurrentUser();
-    if (!user || !user.tenantId) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
+    const user = await requireAuth();
+    const { id: conversationId } = await params;
 
-    const conversationId = params.id;
-
-    // 2. Verify conversation belongs to tenant
+    // Tenant check + includes contact + channel
     const conversation = await getConversationOrThrow(user.tenantId, conversationId);
 
-    // 3. Parse and validate request body
+    // Validate request body (expect text/subject/etc. from your schema)
     const body = await request.json();
-    const validated = sendMessageSchema.parse(body);
+    const validated = SendMessageSchema.parse(body);
 
-    // 4. Get tenant messaging profile for "from" details (stub)
-    const messagingProfile = await prisma.tenantMessagingProfile.findFirst({
-      where: {
-        tenantId: user.tenantId,
-        channel: validated.channel,
-      },
-      select: {
-        phoneNumber: true,
-        email: true,
-      },
-    });
+    // Force channel from conversation (prevents mismatch bugs)
+    const channel = conversation.channel;
 
-    // Determine "from" and "to" based on channel
-    let from: string;
+    // Determine "to" based on conversation channel
     let to: string;
-
-    if (validated.channel === 'SMS' || validated.channel === 'WHATSAPP' || validated.channel === 'VOICE') {
-      from = messagingProfile?.phoneNumber || '+1234567890'; // Stub fallback
-      to = conversation.contact.phone || '';
-    } else if (validated.channel === 'EMAIL') {
-      from = messagingProfile?.email || 'noreply@example.com'; // Stub fallback
-      to = conversation.contact.email || '';
+    if (channel === "SMS") {
+      to = conversation.contact.phone || "";
+      if (!to) {
+        return NextResponse.json(
+          { error: "Contact has no phone number for SMS" },
+          { status: 400 }
+        );
+      }
+    } else if (channel === "EMAIL") {
+      to = conversation.contact.email || "";
+      if (!to) {
+        return NextResponse.json(
+          { error: "Contact has no email address" },
+          { status: 400 }
+        );
+      }
     } else {
-      // For social channels, use IDs
-      from = `tenant_${user.tenantId}`;
-      to = `contact_${conversation.contactId}`;
+      return NextResponse.json({ error: "Unsupported channel" }, { status: 400 });
     }
 
-    // 5. STUB SEND IMPLEMENTATION
-    // Step 1: Create message with QUEUED status
-    const now = new Date();
-    let message = await prisma.message.create({
-      data: {
-        conversationId,
-        channel: validated.channel,
-        direction: 'OUTBOUND',
-        text: validated.text,
-        subject: validated.subject || null,
-        status: 'QUEUED',
-        from,
-        to,
-        provider: 'STUB_PROVIDER',
+    // Tenant messaging profile (no channel field in schema)
+    const messagingProfile = await prisma.tenantMessagingProfile.findUnique({
+      where: { tenantId: user.tenantId },
+      select: {
+        smsFromNumber: true,
+        emailFromAddress: true,
+        emailFromName: true,
       },
     });
 
-    // Step 2: Immediately update to SENT (simulating successful send)
-    message = await prisma.message.update({
-      where: {
-        id: message.id,
-        conversation: {
-          tenantId: user.tenantId, // Ensure tenant isolation
-        },
-      },
-      data: {
-        status: 'SENT',
-        sentAt: now,
-      },
-    });
-
-    // Step 3: Update conversation timestamps
-    await prisma.conversation.update({
-      where: {
-        id: conversationId,
-        tenantId: user.tenantId,
-      },
-      data: {
-        lastMessageAt: now,
-        lastOutboundAt: now,
-      },
-    });
-
-    // Step 4: Add engagement events (for SMS stub)
-    if (validated.channel === 'SMS') {
-      // Simulate delivery event
-      await addEngagementEvent(user.tenantId, {
-        conversationId,
-        messageId: message.id,
-        type: 'DELIVERED',
-        meta: {
-          provider: 'STUB_PROVIDER',
-          timestamp: now.toISOString(),
-        },
-      });
+    // Determine "from" based on channel
+    let from: string;
+    if (channel === "SMS") {
+      from = messagingProfile?.smsFromNumber || "demo";
+    } else {
+      // EMAIL
+      from = messagingProfile?.emailFromAddress || "demo@example.com";
     }
 
-    return NextResponse.json(
-      {
-        message,
-        stub: true, // Indicate this is a stub implementation
-      },
-      { status: 201 }
+    // Create outbound message (stub send for now)
+    const message = await createOutboundMessage(
+      user.tenantId,
+      conversationId,
+      { ...validated, channel }, // ensure channel matches conversation
+      { from, to }
     );
+
+    return NextResponse.json({ message, stub: true }, { status: 201 });
   } catch (error) {
-    console.error('Send message error:', error);
+    if (error instanceof Response) return error;
 
     if (error instanceof z.ZodError) {
       return NextResponse.json(
-        { error: 'Validation failed', details: error.errors },
+        { error: "Validation failed", details: error.errors },
         { status: 400 }
       );
     }
 
-    if (error instanceof Error) {
-      if (error.message.includes('not found') || error.message.includes('access denied')) {
-        return NextResponse.json(
-          { error: 'Conversation not found' },
-          { status: 404 }
-        );
-      }
-    }
-
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    console.error("Send message error:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

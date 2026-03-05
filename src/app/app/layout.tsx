@@ -50,6 +50,13 @@ export default async function AdminLayout({
           </Link>
 
           <Link
+            href="/app/conversations"
+            className="rounded-md px-3 py-2 text-gray-800 hover:bg-gray-100"
+          >
+            Messages
+          </Link>
+
+          <Link
             href="/app/settings"
             className="rounded-md px-3 py-2 text-gray-800 hover:bg-gray-100"
           >

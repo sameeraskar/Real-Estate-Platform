@@ -1,181 +1,115 @@
-import { prisma } from '@/lib/prisma';
-import { CreateConversationSchema, SendMessageSchema } from './schemas';
-import type { CreateConversationInput, SendMessageInput } from './schemas';
+// src/lib/messaging/conversationService.ts
 
-// ============================================================================
-// CONVERSATION OPERATIONS
-// ============================================================================
+import { prisma } from "@/lib/prisma";
+import type { CreateConversationInput, SendMessageInput } from "@/lib/messaging/schemas";
+import { randomUUID } from "crypto";
 
 /**
- * Get a conversation by ID with tenant ownership check
- * Throws Response 404 if conversation doesn't exist or doesn't belong to tenant
+ * Throw a Response so route handlers can return it directly.
  */
-export async function getConversationOrThrow(
-  tenantId: string,
-  conversationId: string
-) {
-  const conversation = await prisma.conversation.findFirst({
-    where: {
-      id: conversationId,
-      tenantId, // TENANT ISOLATION
-    },
+function httpError(status: number, message: string) {
+  throw new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+// ============================================================================
+// Conversations
+// ============================================================================
+
+export async function listConversations(tenantId: string) {
+  return prisma.conversation.findMany({
+    where: { tenantId },
+    orderBy: [{ lastMessageAt: "desc" }, { createdAt: "desc" }],
+    take: 200,
     include: {
       contact: {
         select: {
           id: true,
-          firstName: true,
-          lastName: true,
+          fullName: true,
           email: true,
           phone: true,
         },
       },
-      listing: {
+      _count: { select: { messages: true } },
+    },
+  });
+}
+
+export async function getConversationOrThrow(tenantId: string, conversationId: string) {
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: conversationId, tenantId },
+    include: {
+      contact: {
         select: {
           id: true,
-          title: true,
-          address: true,
+          fullName: true,
+          email: true,
+          phone: true,
         },
       },
-      lead: {
-        select: {
-          id: true,
-          status: true,
-          source: true,
-        },
-      },
+      listing: { select: { id: true, title: true, address: true } },
+      lead: { select: { id: true, status: true, source: true } },
     },
   });
 
   if (!conversation) {
-    throw new Response('Conversation not found', { status: 404 });
+    httpError(404, "Conversation not found");
   }
 
   return conversation;
 }
 
-/**
- * List all conversations for a tenant
- * Returns conversations ordered by lastMessageAt descending
- */
-export async function listConversations(tenantId: string) {
-  const conversations = await prisma.conversation.findMany({
-    where: {
-      tenantId, // TENANT ISOLATION
-    },
-    include: {
-      contact: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          email: true,
-          phone: true,
-        },
-      },
-      _count: {
-        select: {
-          messages: true,
-        },
-      },
-    },
-    orderBy: {
-      lastMessageAt: 'desc',
-    },
-  });
-
-  return conversations;
-}
-
-/**
- * Create a new conversation
- * Verifies contact belongs to tenant before creating
- * Throws Response 404 if contact not found
- */
 export async function createConversationOrThrow(
   tenantId: string,
-  data: CreateConversationInput
+  input: CreateConversationInput
 ) {
-  // Validate input
-  const validated = CreateConversationSchema.parse(data);
-
-  // Verify contact belongs to tenant
   const contact = await prisma.contact.findFirst({
-    where: {
-      id: validated.contactId,
-      tenantId, // TENANT ISOLATION
-    },
+    where: { id: input.contactId, tenantId },
     select: { id: true },
   });
 
   if (!contact) {
-    throw new Response('Contact not found or access denied', { status: 404 });
+    httpError(404, "Contact not found");
   }
 
-  // Verify listing belongs to tenant if provided
-  if (validated.listingId) {
+  let safeListingId: string | null = null;
+  if (input.listingId) {
     const listing = await prisma.listing.findFirst({
-      where: {
-        id: validated.listingId,
-        tenantId, // TENANT ISOLATION
-      },
+      where: { id: input.listingId, tenantId },
       select: { id: true },
     });
-
-    if (!listing) {
-      throw new Response('Listing not found or access denied', { status: 404 });
-    }
+    if (!listing) httpError(404, "Listing not found");
+    safeListingId = listing.id;
   }
 
-  // Verify lead belongs to tenant if provided
-  if (validated.leadId) {
+  let safeLeadId: string | null = null;
+  if (input.leadId) {
     const lead = await prisma.lead.findFirst({
-      where: {
-        id: validated.leadId,
-        tenantId, // TENANT ISOLATION
-      },
+      where: { id: input.leadId, tenantId },
       select: { id: true },
     });
-
-    if (!lead) {
-      throw new Response('Lead not found or access denied', { status: 404 });
-    }
+    if (!lead) httpError(404, "Lead not found");
+    safeLeadId = lead.id;
   }
 
-  // Create conversation
   const conversation = await prisma.conversation.create({
     data: {
-      tenantId, // TENANT ISOLATION
-      contactId: validated.contactId,
-      channel: validated.channel,
-      status: 'ACTIVE',
-      listingId: validated.listingId || null,
-      leadId: validated.leadId || null,
-      lastMessageAt: new Date(),
+      tenantId,
+      contactId: input.contactId,
+      channel: input.channel, // "SMS" | "EMAIL"
+      listingId: safeListingId,
+      leadId: safeLeadId,
+      // status defaults to OPEN
     },
     include: {
       contact: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          email: true,
-          phone: true,
-        },
+        select: { id: true, fullName: true, email: true, phone: true },
       },
-      listing: {
-        select: {
-          id: true,
-          title: true,
-          address: true,
-        },
-      },
-      lead: {
-        select: {
-          id: true,
-          status: true,
-          source: true,
-        },
-      },
+      listing: { select: { id: true, title: true, address: true } },
+      lead: { select: { id: true, status: true, source: true } },
+      _count: { select: { messages: true } },
     },
   });
 
@@ -183,77 +117,112 @@ export async function createConversationOrThrow(
 }
 
 // ============================================================================
-// MESSAGE OPERATIONS
+// Messages
 // ============================================================================
 
-/**
- * List messages for a conversation
- * Verifies conversation belongs to tenant
- * Returns messages ordered by createdAt ascending (oldest first)
- */
-export async function listMessages(
-  tenantId: string,
-  conversationId: string
-) {
-  // Verify conversation ownership first
-  await getConversationOrThrow(tenantId, conversationId);
-
-  const messages = await prisma.message.findMany({
-    where: {
-      conversationId,
-      conversation: {
-        tenantId, // TENANT ISOLATION - double check
-      },
-    },
-    orderBy: {
-      createdAt: 'asc', // Oldest first (chat order)
-    },
+export async function listMessages(tenantId: string, conversationId: string) {
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: conversationId, tenantId },
+    select: { id: true },
   });
 
-  return messages;
+  if (!conversation) {
+    httpError(404, "Conversation not found");
+  }
+
+  return prisma.message.findMany({
+    where: { tenantId, conversationId },
+    orderBy: { createdAt: "asc" },
+    take: 500,
+    select: {
+      id: true,
+      createdAt: true,
+      updatedAt: true,
+      conversationId: true,
+      channel: true,
+      direction: true,
+      status: true,
+      from: true,
+      to: true,
+      subject: true,
+      text: true,
+      html: true,
+      provider: true,
+      providerMessageId: true,
+      errorCode: true,
+      errorMessage: true,
+      sentAt: true,
+      deliveredAt: true,
+      failedAt: true,
+      trackingId: true,
+    },
+  });
 }
 
 /**
- * Create an outbound message
- * Stub implementation: immediately marks as SENT
- * Updates conversation timestamps
+ * Stub outbound sender: writes Message row + updates conversation timestamps.
+ * Real provider sending (Twilio/SendGrid) comes later.
+ *
+ * ✅ Email open/click tracking foundation:
+ * - For EMAIL outbound messages, we generate trackingId and store it on Message.
+ * - Pixel/click endpoints will use trackingId to create EngagementEvent rows.
  */
 export async function createOutboundMessage(
   tenantId: string,
   conversationId: string,
-  messageData: SendMessageInput,
-  metadata: { from: string; to: string }
+  validated: SendMessageInput,
+  addressing: { from: string; to: string }
 ) {
-  // Validate input
-  const validated = SendMessageSchema.parse(messageData);
+  const { from, to } = addressing;
 
-  // Verify conversation ownership
-  await getConversationOrThrow(tenantId, conversationId);
+  const convo = await prisma.conversation.findFirst({
+    where: { id: conversationId, tenantId },
+    select: { id: true, channel: true, status: true },
+  });
+
+  if (!convo) httpError(404, "Conversation not found");
+  if (convo.status !== "OPEN") httpError(400, "Conversation is not open");
 
   const now = new Date();
 
-  // Create message and update conversation in a transaction
+  // ✅ Only email gets trackingId
+  const trackingId =
+    validated.channel === "EMAIL" ? `trk_${randomUUID().replace(/-/g, "")}` : null;
+
   const [message] = await prisma.$transaction([
-    // Create outbound message
     prisma.message.create({
       data: {
+        tenantId,
         conversationId,
         channel: validated.channel,
-        direction: 'OUTBOUND',
+        direction: "OUTBOUND",
+        status: "SENT", // stub
+        from,
+        to,
+        subject: validated.subject ?? null,
         text: validated.text,
-        subject: validated.subject || null,
-        status: 'SENT', // Stub: immediately mark as sent
-        from: metadata.from,
-        to: metadata.to,
         sentAt: now,
+        trackingId,
+      },
+      select: {
+        id: true,
+        createdAt: true,
+        updatedAt: true,
+        conversationId: true,
+        channel: true,
+        direction: true,
+        status: true,
+        from: true,
+        to: true,
+        subject: true,
+        text: true,
+        sentAt: true,
+        trackingId: true,
       },
     }),
-    // Update conversation timestamps
-    prisma.conversation.update({
-      where: {
-        id: conversationId,
-        tenantId, // TENANT ISOLATION
-      },
+
+    prisma.conversation.updateMany({
+      where: { id: conversationId, tenantId },
       data: {
         lastMessageAt: now,
         lastOutboundAt: now,
