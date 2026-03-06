@@ -1,17 +1,23 @@
-// src/lib/messaging/conversationService.ts
-
 import { prisma } from "@/lib/prisma";
 import type { CreateConversationInput, SendMessageInput } from "@/lib/messaging/schemas";
 import { randomUUID } from "crypto";
+import { buildTrackedEmailHtml } from "@/lib/messaging/emailTracking";
 
-/**
- * Throw a Response so route handlers can return it directly.
- */
 function httpError(status: number, message: string) {
   throw new Response(JSON.stringify({ error: message }), {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function getBaseUrl() {
+  // Prefer explicit app URL
+  const envUrl =
+    process.env.NEXT_PUBLIC_APP_URL ||
+    process.env.NEXTAUTH_URL ||
+    "http://localhost:3000";
+
+  return envUrl.replace(/\/$/, "");
 }
 
 // ============================================================================
@@ -25,12 +31,7 @@ export async function listConversations(tenantId: string) {
     take: 200,
     include: {
       contact: {
-        select: {
-          id: true,
-          fullName: true,
-          email: true,
-          phone: true,
-        },
+        select: { id: true, fullName: true, email: true, phone: true },
       },
       _count: { select: { messages: true } },
     },
@@ -41,23 +42,13 @@ export async function getConversationOrThrow(tenantId: string, conversationId: s
   const conversation = await prisma.conversation.findFirst({
     where: { id: conversationId, tenantId },
     include: {
-      contact: {
-        select: {
-          id: true,
-          fullName: true,
-          email: true,
-          phone: true,
-        },
-      },
+      contact: { select: { id: true, fullName: true, email: true, phone: true } },
       listing: { select: { id: true, title: true, address: true } },
       lead: { select: { id: true, status: true, source: true } },
     },
   });
 
-  if (!conversation) {
-    httpError(404, "Conversation not found");
-  }
-
+  if (!conversation) httpError(404, "Conversation not found");
   return conversation;
 }
 
@@ -70,9 +61,7 @@ export async function createConversationOrThrow(
     select: { id: true },
   });
 
-  if (!contact) {
-    httpError(404, "Contact not found");
-  }
+  if (!contact) httpError(404, "Contact not found");
 
   let safeListingId: string | null = null;
   if (input.listingId) {
@@ -94,26 +83,21 @@ export async function createConversationOrThrow(
     safeLeadId = lead.id;
   }
 
-  const conversation = await prisma.conversation.create({
+  return prisma.conversation.create({
     data: {
       tenantId,
       contactId: input.contactId,
-      channel: input.channel, // "SMS" | "EMAIL"
+      channel: input.channel,
       listingId: safeListingId,
       leadId: safeLeadId,
-      // status defaults to OPEN
     },
     include: {
-      contact: {
-        select: { id: true, fullName: true, email: true, phone: true },
-      },
+      contact: { select: { id: true, fullName: true, email: true, phone: true } },
       listing: { select: { id: true, title: true, address: true } },
       lead: { select: { id: true, status: true, source: true } },
       _count: { select: { messages: true } },
     },
   });
-
-  return conversation;
 }
 
 // ============================================================================
@@ -126,9 +110,7 @@ export async function listMessages(tenantId: string, conversationId: string) {
     select: { id: true },
   });
 
-  if (!conversation) {
-    httpError(404, "Conversation not found");
-  }
+  if (!conversation) httpError(404, "Conversation not found");
 
   return prisma.message.findMany({
     where: { tenantId, conversationId },
@@ -147,10 +129,6 @@ export async function listMessages(tenantId: string, conversationId: string) {
       subject: true,
       text: true,
       html: true,
-      provider: true,
-      providerMessageId: true,
-      errorCode: true,
-      errorMessage: true,
       sentAt: true,
       deliveredAt: true,
       failedAt: true,
@@ -159,14 +137,6 @@ export async function listMessages(tenantId: string, conversationId: string) {
   });
 }
 
-/**
- * Stub outbound sender: writes Message row + updates conversation timestamps.
- * Real provider sending (Twilio/SendGrid) comes later.
- *
- * ✅ Email open/click tracking foundation:
- * - For EMAIL outbound messages, we generate trackingId and store it on Message.
- * - Pixel/click endpoints will use trackingId to create EngagementEvent rows.
- */
 export async function createOutboundMessage(
   tenantId: string,
   conversationId: string,
@@ -177,7 +147,7 @@ export async function createOutboundMessage(
 
   const convo = await prisma.conversation.findFirst({
     where: { id: conversationId, tenantId },
-    select: { id: true, channel: true, status: true },
+    select: { id: true, status: true },
   });
 
   if (!convo) httpError(404, "Conversation not found");
@@ -185,9 +155,18 @@ export async function createOutboundMessage(
 
   const now = new Date();
 
-  // ✅ Only email gets trackingId
   const trackingId =
     validated.channel === "EMAIL" ? `trk_${randomUUID().replace(/-/g, "")}` : null;
+
+  const html =
+    validated.channel === "EMAIL" && trackingId
+      ? buildTrackedEmailHtml({
+          baseUrl: getBaseUrl(),
+          trackingId,
+          subject: validated.subject ?? null,
+          text: validated.text,
+        })
+      : null;
 
   const [message] = await prisma.$transaction([
     prisma.message.create({
@@ -201,6 +180,7 @@ export async function createOutboundMessage(
         to,
         subject: validated.subject ?? null,
         text: validated.text,
+        html,
         sentAt: now,
         trackingId,
       },
@@ -216,6 +196,7 @@ export async function createOutboundMessage(
         to: true,
         subject: true,
         text: true,
+        html: true,
         sentAt: true,
         trackingId: true,
       },
@@ -223,10 +204,7 @@ export async function createOutboundMessage(
 
     prisma.conversation.updateMany({
       where: { id: conversationId, tenantId },
-      data: {
-        lastMessageAt: now,
-        lastOutboundAt: now,
-      },
+      data: { lastMessageAt: now, lastOutboundAt: now },
     }),
   ]);
 
